@@ -75,6 +75,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.actionPoly.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.POLY))
         self.actionPoint.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.POINT))
         self.actionRBox.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.RBOX))
+        self.actionComboRect.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.COMBO_RECT))
 
         self.samSwitch.toggled.connect(self.on_sam_toggled)
 
@@ -298,6 +299,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.actionPoint.setChecked(True)
         elif mode == CanvasMode.RBOX:
             self.actionRBox.setChecked(True)
+        elif mode == CanvasMode.COMBO_RECT:
+            self.actionComboRect.setChecked(True)
 
         if mode == CanvasMode.POINT:
             if self.samSwitch.isChecked():
@@ -329,6 +332,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.helpLabel.setText("操作: 点击添加点标注")
         elif mode == CanvasMode.RBOX:
             self.helpLabel.setText("操作: 拖动绘制旋转框，Z/X/C/V调整角度")
+        elif mode == CanvasMode.COMBO_RECT:
+            if is_sam:
+                self.helpLabel.setText("操作: 右键加点预览，左键合并为一个大矩形标注")
+            else:
+                self.helpLabel.setText("操作: 请先开启SAM智能辅助")
 
     def load_classes(self, dir_path):
         self.class_list.clear()
@@ -754,6 +762,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.actionPoint.trigger()
         elif key == Qt.Key_O:
             self.actionRBox.trigger()
+        elif key == Qt.Key_M:
+            self.actionComboRect.trigger()
 
         super().keyPressEvent(event)
 

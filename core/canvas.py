@@ -11,10 +11,11 @@ class CanvasMode:
     POLY = 2
     POINT = 3
     RBOX = 4
+    COMBO_RECT = 5
 
     @staticmethod
     def get_mode_name(mode):
-        names = {1: "矩形", 2: "多边形", 3: "点", 4: "旋转框"}
+        names = {1: "矩形", 2: "多边形", 3: "点", 4: "旋转框", 5: "组合矩形"}
         return names.get(mode, "未知")
 
 
@@ -39,9 +40,19 @@ class Canvas(QGraphicsScene):
         # 智能悬停提示图层
         self.sam_hover_item = None
 
-        # 多点提示收集
+        # 多点提示收集（右键多点合一）
         self.sam_multi_points = []
         self.sam_point_markers = []
+
+        # 多集合提示（Ctrl+右键，每个点独立推理，合并预览）
+        self.sam_multiset_markers = []
+        self.sam_multiset_preview_items = []
+        self.sam_multiset_results = []
+
+        # 组合矩形：右键加点各自预览，左键合并大矩形
+        self.combo_markers = []
+        self.combo_preview_items = []
+        self.combo_results = []  # [(x, y, w, h), ...]
 
         self.h_line = QGraphicsLineItem()
         self.v_line = QGraphicsLineItem()
@@ -109,10 +120,11 @@ class Canvas(QGraphicsScene):
         clamped_pt = self.clamp_point(pt)
 
         # ---------------- SAM 智能辅助悬停 ----------------
-        if self.sam_enabled and len(self.sam_multi_points) > 0:
+        has_points = len(self.sam_multi_points) > 0 or len(self.combo_markers) > 0
+        if self.sam_enabled and has_points:
             return
-        if self.sam_enabled and self.is_inside_image(pt) and self.mode in [CanvasMode.RECT, CanvasMode.POLY,
-                                                                           CanvasMode.RBOX]:
+        if self.sam_enabled and self.is_inside_image(pt) and self.mode in [
+            CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.COMBO_RECT]:
             if self.sam_client:
                 self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=False)
             return
@@ -131,7 +143,6 @@ class Canvas(QGraphicsScene):
                 self.temp_item.is_temp = True
                 self.temp_item.setPen(QPen(QColor(28, 126, 214), 2, Qt.DashLine))
 
-            # 手动拉框时，调用全新的 RotatedRectShape 参数格式
             elif self.mode == CanvasMode.RBOX:
                 cx, cy = rect.center().x(), rect.center().y()
                 w, h = max(1, rect.width()), max(1, rect.height())
@@ -143,26 +154,64 @@ class Canvas(QGraphicsScene):
             self.update_temp_poly(mouse_pos=clamped_pt)
 
     def handle_sam_result(self, poly_pts, rect_xywh, rect_obb, score, is_click):
-        """处理来自 SAM 后台的推理结果，正确区分矩形、多边形和旋转框"""
-        # 支持 RBOX
-        if not self.sam_enabled or self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+        """处理 SAM 单点推理结果"""
+        if not self.sam_enabled:
+            return
+
+        # ---- 组合矩形模式 ----
+        if self.mode == CanvasMode.COMBO_RECT:
+            if not is_click and rect_xywh:
+                # 悬停预览 + 收集右键加点的结果
+                if len(self.combo_markers) > 0:
+                    self.combo_results.append(list(rect_xywh))
+                    item = QGraphicsRectItem(QRectF(*rect_xywh))
+                    item.setPen(QPen(QColor(0, 200, 255), 2, Qt.DashLine))
+                    item.setBrush(QBrush(QColor(0, 200, 255, 40)))
+                    self.addItem(item)
+                    self.combo_preview_items.append(item)
+                    # 更新合并大矩形预览
+                    self._update_combo_merged_preview()
+                    return
+            # 普通悬停（还没右键加点时）
+            if self.sam_hover_item:
+                self.removeItem(self.sam_hover_item)
+                self.sam_hover_item = None
+            if not poly_pts or not rect_xywh:
+                return
+            if is_click:
+                return
+            self.sam_hover_item = QGraphicsRectItem(QRectF(*rect_xywh))
+            self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
+            self.sam_hover_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+            self.addItem(self.sam_hover_item)
+            return
+
+        # ---- 其他模式 ----
+        if self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+            return
+
+        # 多集合模式
+        is_multiset = len(self.sam_multiset_markers) > 0 and not is_click
+        if is_multiset:
+            if not poly_pts or not rect_xywh:
+                return
+            self.sam_multiset_results.append((list(poly_pts), list(rect_xywh), list(rect_obb) if rect_obb else []))
+            preview = self._make_preview_shape(poly_pts, rect_xywh, rect_obb, QColor(0, 200, 255))
+            if preview:
+                self.sam_multiset_preview_items.append(preview)
             return
 
         if self.sam_hover_item:
             self.removeItem(self.sam_hover_item)
             self.sam_hover_item = None
-
         if not poly_pts or not rect_xywh:
             return
 
-        # ---- 模式判断：矩形智能框 / 多边形点选 / 旋转框 ----
         if self.mode == CanvasMode.RECT:
             x, y, w, h = rect_xywh
             rect = QRectF(x, y, w, h)
-
             if is_click:
-                shape = RectShape(rect)
-                self.shape_drawn.emit(shape)
+                self.shape_drawn.emit(RectShape(rect))
             else:
                 self.sam_hover_item = QGraphicsRectItem(rect)
                 self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
@@ -172,22 +221,18 @@ class Canvas(QGraphicsScene):
         elif self.mode == CanvasMode.POLY:
             qpts = [QPointF(p[0], p[1]) for p in poly_pts]
             if is_click:
-                shape = PolyShape(QPolygonF(qpts))
-                self.shape_drawn.emit(shape)
+                self.shape_drawn.emit(PolyShape(QPolygonF(qpts)))
             else:
                 self.sam_hover_item = PolyShape(QPolygonF(qpts), is_temp=True)
                 self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
                 self.sam_hover_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
                 self.addItem(self.sam_hover_item)
 
-        # SAM 的 OBB 旋转框处理分支
         elif self.mode == CanvasMode.RBOX:
             if not rect_obb or len(rect_obb) < 5: return
             cx, cy, w, h, angle = rect_obb
-
             if is_click:
-                shape = RotatedRectShape(cx, cy, w, h, angle)
-                self.shape_drawn.emit(shape)
+                self.shape_drawn.emit(RotatedRectShape(cx, cy, w, h, angle))
             else:
                 self.sam_hover_item = RotatedRectShape(cx, cy, w, h, angle, is_temp=True)
                 self.addItem(self.sam_hover_item)
@@ -235,7 +280,47 @@ class Canvas(QGraphicsScene):
         pt = event.scenePos()
         clamped_pt = self.clamp_point(pt)
 
-        # ---------------- SAM 右键加点预览 ----------------
+        # ================ 组合矩形模式 ================
+        if (self.sam_enabled and self.mode == CanvasMode.COMBO_RECT
+                and self.is_inside_image(pt)):
+            # 右键：加点 + 单点推理
+            if event.button() == Qt.RightButton:
+                marker = QGraphicsEllipseItem(clamped_pt.x() - 5, clamped_pt.y() - 5, 10, 10)
+                marker.setPen(QPen(QColor(0, 200, 255), 2))
+                marker.setBrush(QBrush(QColor(0, 200, 255, 180)))
+                marker.setZValue(9998)
+                self.addItem(marker)
+                self.combo_markers.append(marker)
+                if self.sam_client:
+                    self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=False)
+                return
+
+            # 左键：确认合并大矩形
+            if event.button() == Qt.LeftButton and len(self.combo_results) > 0:
+                min_x = min(r[0] for r in self.combo_results)
+                min_y = min(r[1] for r in self.combo_results)
+                max_x = max(r[0] + r[2] for r in self.combo_results)
+                max_y = max(r[1] + r[3] for r in self.combo_results)
+                self.shape_drawn.emit(RectShape(QRectF(min_x, min_y, max_x - min_x, max_y - min_y)))
+                self.clear_combo()
+                return
+
+        # ================ SAM Ctrl+右键：多集合独立推理 ================
+        if (self.sam_enabled and event.button() == Qt.RightButton
+                and event.modifiers() & Qt.ControlModifier
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]
+                and self.is_inside_image(pt)):
+            marker = QGraphicsEllipseItem(clamped_pt.x() - 5, clamped_pt.y() - 5, 10, 10)
+            marker.setPen(QPen(QColor(0, 200, 255), 2))
+            marker.setBrush(QBrush(QColor(0, 200, 255, 180)))
+            marker.setZValue(9998)
+            self.addItem(marker)
+            self.sam_multiset_markers.append(marker)
+            if self.sam_client:
+                self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=False)
+            return
+
+        # ================ SAM 右键：多点合一预览 ================
         if (self.sam_enabled and event.button() == Qt.RightButton
                 and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]
                 and self.is_inside_image(pt)):
@@ -250,17 +335,29 @@ class Canvas(QGraphicsScene):
                 self.sam_client.request_multi_point_inference(self.sam_multi_points, is_click=False)
             return
 
-        # ---------------- SAM 左键确认 ----------------
+        # ================ SAM 左键确认 ================
         if (self.sam_enabled and event.button() == Qt.LeftButton
                 and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]):
-            # 有收集的多点 → 用多点确认
+            # 多集合确认
+            if len(self.sam_multiset_results) > 0:
+                for poly_pts, rect_xywh, rect_obb in self.sam_multiset_results:
+                    shape = self._make_permanent_shape(poly_pts, rect_xywh, rect_obb)
+                    if shape:
+                        self.shape_drawn.emit(shape)
+                self.clear_multiset()
+                return
+            # 多点合一确认
             if len(self.sam_multi_points) > 0 and self.sam_client:
                 self.sam_client.request_multi_point_inference(list(self.sam_multi_points), is_click=True)
                 self.clear_multi_points()
                 return
-            # 无多点 → 单点确认
+            # 单点确认
             if self.is_inside_image(pt) and self.sam_client:
                 self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=True)
+            return
+
+        # 右键：SAM 模式下拦截
+        if event.button() == Qt.RightButton and self.sam_enabled:
             return
 
         items = self.items(clamped_pt)
@@ -309,8 +406,6 @@ class Canvas(QGraphicsScene):
                 shape = PointShape(clamped_pt)
                 self.shape_drawn.emit(shape)
         elif event.button() == Qt.RightButton:
-            if self.sam_enabled:
-                return
             if self.mode == CanvasMode.POLY and len(self.poly_pts) > 2:
                 self.finish_poly_shape()
 
@@ -330,8 +425,6 @@ class Canvas(QGraphicsScene):
                 if rect.width() > 5 and rect.height() > 5:
                     if self.mode == CanvasMode.RECT:
                         self.shape_drawn.emit(RectShape(rect))
-
-                    # 手动松开鼠标完成绘制时，实例化新的 RotatedRectShape
                     elif self.mode == CanvasMode.RBOX:
                         cx, cy = rect.center().x(), rect.center().y()
                         w, h = rect.width(), rect.height()
@@ -388,12 +481,92 @@ class Canvas(QGraphicsScene):
             self.removeItem(self.sam_hover_item)
             self.sam_hover_item = None
         self.clear_multi_points()
+        self.clear_multiset()
+        self.clear_combo()
 
     def clear_multi_points(self):
         self.sam_multi_points.clear()
         for m in self.sam_point_markers:
             self.removeItem(m)
         self.sam_point_markers.clear()
+
+    def clear_multiset(self):
+        for m in self.sam_multiset_markers:
+            self.removeItem(m)
+        self.sam_multiset_markers.clear()
+        for s in self.sam_multiset_preview_items:
+            self.removeItem(s)
+        self.sam_multiset_preview_items.clear()
+        self.sam_multiset_results.clear()
+
+    def clear_combo(self):
+        for m in self.combo_markers:
+            self.removeItem(m)
+        self.combo_markers.clear()
+        for p in self.combo_preview_items:
+            self.removeItem(p)
+        self.combo_preview_items.clear()
+        self.combo_results.clear()
+        if hasattr(self, '_combo_merged_preview') and self._combo_merged_preview:
+            self.removeItem(self._combo_merged_preview)
+            self._combo_merged_preview = None
+
+    def _update_combo_merged_preview(self):
+        """更新组合矩形的大矩形合并预览"""
+        if hasattr(self, '_combo_merged_preview') and self._combo_merged_preview:
+            self.removeItem(self._combo_merged_preview)
+            self._combo_merged_preview = None
+        if not self.combo_results:
+            return
+        min_x = min(r[0] for r in self.combo_results)
+        min_y = min(r[1] for r in self.combo_results)
+        max_x = max(r[0] + r[2] for r in self.combo_results)
+        max_y = max(r[1] + r[3] for r in self.combo_results)
+        self._combo_merged_preview = QGraphicsRectItem(QRectF(min_x, min_y, max_x - min_x, max_y - min_y))
+        self._combo_merged_preview.setPen(QPen(QColor(255, 100, 100), 3, Qt.DashLine))
+        self._combo_merged_preview.setBrush(QBrush(QColor(255, 100, 100, 30)))
+        self._combo_merged_preview.setZValue(9997)
+        self.addItem(self._combo_merged_preview)
+
+    def _make_preview_shape(self, poly_pts, rect_xywh, rect_obb, color):
+        pen = QPen(color, 2, Qt.DashLine)
+        brush = QBrush(QColor(color.red(), color.green(), color.blue(), 50))
+        if self.mode == CanvasMode.RECT:
+            x, y, w, h = rect_xywh
+            item = QGraphicsRectItem(QRectF(x, y, w, h))
+            item.setPen(pen)
+            item.setBrush(brush)
+            self.addItem(item)
+            return item
+        elif self.mode == CanvasMode.POLY:
+            qpts = [QPointF(p[0], p[1]) for p in poly_pts]
+            item = PolyShape(QPolygonF(qpts), is_temp=True)
+            item.setPen(pen)
+            item.setBrush(brush)
+            self.addItem(item)
+            return item
+        elif self.mode == CanvasMode.RBOX:
+            if not rect_obb or len(rect_obb) < 5:
+                return None
+            cx, cy, w, h, angle = rect_obb
+            item = RotatedRectShape(cx, cy, w, h, angle, is_temp=True)
+            self.addItem(item)
+            return item
+        return None
+
+    def _make_permanent_shape(self, poly_pts, rect_xywh, rect_obb):
+        if self.mode == CanvasMode.RECT:
+            x, y, w, h = rect_xywh
+            return RectShape(QRectF(x, y, w, h))
+        elif self.mode == CanvasMode.POLY:
+            qpts = [QPointF(p[0], p[1]) for p in poly_pts]
+            return PolyShape(QPolygonF(qpts))
+        elif self.mode == CanvasMode.RBOX:
+            if not rect_obb or len(rect_obb) < 5:
+                return None
+            cx, cy, w, h, angle = rect_obb
+            return RotatedRectShape(cx, cy, w, h, angle)
+        return None
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -408,6 +581,15 @@ class Canvas(QGraphicsScene):
                 self.poly_pts.pop()
                 self.update_temp_poly()
         elif key == Qt.Key_Return or key == Qt.Key_Enter:
+            # 回车：多集合模式合并大矩形
+            if self.sam_enabled and len(self.sam_multiset_results) > 0 and self.mode == CanvasMode.RECT:
+                min_x = min(r[1][0] for r in self.sam_multiset_results)
+                min_y = min(r[1][1] for r in self.sam_multiset_results)
+                max_x = max(r[1][0] + r[1][2] for r in self.sam_multiset_results)
+                max_y = max(r[1][1] + r[1][3] for r in self.sam_multiset_results)
+                self.shape_drawn.emit(RectShape(QRectF(min_x, min_y, max_x - min_x, max_y - min_y)))
+                self.clear_multiset()
+                return
             if self.mode == CanvasMode.POLY and len(self.poly_pts) > 2:
                 self.finish_poly_shape()
         elif key == Qt.Key_Escape:
