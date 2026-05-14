@@ -45,10 +45,9 @@ class ModelLoadWorker(QThread):
 
 
 class SamInferenceWorker(QThread):
-    # 🟢 修复：增加了第五个 list 参数，用于传输 OBB 旋转框数据
     result_ready = Signal(list, list, list, float, bool)
-
     text_result_ready = Signal(list, str)
+    multi_point_result = Signal(list, list, list, float, bool)
 
     def __init__(self):
         super().__init__()
@@ -155,6 +154,47 @@ class SamInferenceWorker(QThread):
 
                         self.text_result_ready.emit(results, prompt_text)
 
+                # ================= 多点提示推理分支 =================
+                elif task_type == 'multi_point':
+                    points = data
+                    if len(points) < 1:
+                        continue
+                    point_coords = np.array(points, dtype=np.float32)
+                    point_labels = np.ones(len(points), dtype=np.int32)
+
+                    with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
+                        masks, scores, _ = self.model.predict_inst(
+                            inference_state=self.inference_state,
+                            point_coords=point_coords,
+                            point_labels=point_labels,
+                            multimask_output=is_click
+                        )
+
+                    if len(scores) > 0:
+                        best_idx = np.argmax(scores)
+                        mask_np = masks[best_idx].cpu().numpy() if torch.is_tensor(masks) else masks[best_idx]
+                        score_val = float(scores[best_idx].cpu() if torch.is_tensor(scores) else scores[best_idx])
+
+                        mask_uint8 = (mask_np > 0.5).astype(np.uint8) * 255
+                        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                        poly_pts = []
+                        rect_xywh = []
+                        rect_obb = []
+                        if contours:
+                            largest_contour = max(contours, key=cv2.contourArea)
+                            epsilon = 0.002 * cv2.arcLength(largest_contour, True)
+                            approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+                            poly_pts = approx.reshape(-1, 2).tolist()
+
+                            x_r, y_r, w_r, h_r = cv2.boundingRect(largest_contour)
+                            rect_xywh = [x_r, y_r, w_r, h_r]
+
+                            obb = cv2.minAreaRect(largest_contour)
+                            rect_obb = [obb[0][0], obb[0][1], obb[1][0], obb[1][1], obb[2]]
+
+                        self.multi_point_result.emit(poly_pts, rect_xywh, rect_obb, score_val, is_click)
+
             except queue.Empty:
                 continue
             except Exception as e:
@@ -176,6 +216,14 @@ class SamInferenceWorker(QThread):
                 pass
         self.task_queue.put(('text', prompt_text, True))
 
+    def request_multi_point_inference(self, points, is_click=False):
+        while not self.task_queue.empty():
+            try:
+                self.task_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self.task_queue.put(('multi_point', points, is_click))
+
     def stop(self):
         self.running = False
         self.wait()
@@ -183,9 +231,9 @@ class SamInferenceWorker(QThread):
 
 class SAMClient(QObject):
     model_status_changed = Signal(bool, str)
-    # 🟢 修复：增加了第五个 list 参数
     inference_result = Signal(list, list, list, float, bool)
     text_result_ready = Signal(list, str)
+    multi_point_result = Signal(list, list, list, float, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -194,6 +242,7 @@ class SAMClient(QObject):
         self.inference_worker = SamInferenceWorker()
         self.inference_worker.result_ready.connect(self.inference_result)
         self.inference_worker.text_result_ready.connect(self.text_result_ready)
+        self.inference_worker.multi_point_result.connect(self.multi_point_result)
         self.inference_worker.start()
         self.load_worker = None
 
@@ -228,6 +277,10 @@ class SAMClient(QObject):
     def request_text_inference(self, prompt_text):
         if self.model:
             self.inference_worker.request_text_inference(prompt_text)
+
+    def request_multi_point_inference(self, points, is_click=False):
+        if self.model:
+            self.inference_worker.request_multi_point_inference(points, is_click)
 
     def cleanup(self):
         self.inference_worker.stop()

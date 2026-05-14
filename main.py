@@ -41,6 +41,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.sam_client.inference_result.connect(self.scene.handle_sam_result)
         self.sam_client.text_result_ready.connect(self.handle_text_results)
         self.sam_client.model_status_changed.connect(self.update_model_status)
+        self.sam_client.multi_point_result.connect(self.scene.handle_multi_point_result)
         self.scene.sam_client = self.sam_client
 
         # 撤销/重做时数据栈

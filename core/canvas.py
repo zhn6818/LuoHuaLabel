@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem
 from PySide6.QtGui import QPixmap, QPolygonF, QPen, QColor, QBrush
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF
 from core.shapes import RectShape, PolyShape, PointShape, RotatedRectShape, HandleItem
@@ -38,6 +38,10 @@ class Canvas(QGraphicsScene):
 
         # 智能悬停提示图层
         self.sam_hover_item = None
+
+        # 多点提示收集
+        self.sam_multi_points = []
+        self.sam_point_markers = []
 
         self.h_line = QGraphicsLineItem()
         self.v_line = QGraphicsLineItem()
@@ -105,7 +109,8 @@ class Canvas(QGraphicsScene):
         clamped_pt = self.clamp_point(pt)
 
         # ---------------- SAM 智能辅助悬停 ----------------
-        # 将 RBOX 加入 SAM 支持的模式列表
+        if self.sam_enabled and len(self.sam_multi_points) > 0:
+            return
         if self.sam_enabled and self.is_inside_image(pt) and self.mode in [CanvasMode.RECT, CanvasMode.POLY,
                                                                            CanvasMode.RBOX]:
             if self.sam_client:
@@ -187,14 +192,73 @@ class Canvas(QGraphicsScene):
                 self.sam_hover_item = RotatedRectShape(cx, cy, w, h, angle, is_temp=True)
                 self.addItem(self.sam_hover_item)
 
+    def handle_multi_point_result(self, poly_pts, rect_xywh, rect_obb, score, is_click):
+        """处理多点提示的 SAM 推理结果"""
+        if not self.sam_enabled or self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+            return
+        if self.sam_hover_item:
+            self.removeItem(self.sam_hover_item)
+            self.sam_hover_item = None
+        if not poly_pts or not rect_xywh:
+            return
+
+        if self.mode == CanvasMode.RECT:
+            x, y, w, h = rect_xywh
+            if is_click:
+                self.shape_drawn.emit(RectShape(QRectF(x, y, w, h)))
+            else:
+                self.sam_hover_item = QGraphicsRectItem(QRectF(x, y, w, h))
+                self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
+                self.sam_hover_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+                self.addItem(self.sam_hover_item)
+
+        elif self.mode == CanvasMode.POLY:
+            qpts = [QPointF(p[0], p[1]) for p in poly_pts]
+            if is_click:
+                self.shape_drawn.emit(PolyShape(QPolygonF(qpts)))
+            else:
+                self.sam_hover_item = PolyShape(QPolygonF(qpts), is_temp=True)
+                self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
+                self.sam_hover_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+                self.addItem(self.sam_hover_item)
+
+        elif self.mode == CanvasMode.RBOX:
+            if not rect_obb or len(rect_obb) < 5: return
+            cx, cy, w, h, angle = rect_obb
+            if is_click:
+                self.shape_drawn.emit(RotatedRectShape(cx, cy, w, h, angle))
+            else:
+                self.sam_hover_item = RotatedRectShape(cx, cy, w, h, angle, is_temp=True)
+                self.addItem(self.sam_hover_item)
+
     def mousePressEvent(self, event):
         pt = event.scenePos()
         clamped_pt = self.clamp_point(pt)
 
-        # ---------------- SAM 确认生成 ----------------
-        # 支持 RBOX
-        if self.sam_enabled and event.button() == Qt.LeftButton and self.mode in [CanvasMode.RECT, CanvasMode.POLY,
-                                                                                  CanvasMode.RBOX]:
+        # ---------------- SAM 右键加点预览 ----------------
+        if (self.sam_enabled and event.button() == Qt.RightButton
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]
+                and self.is_inside_image(pt)):
+            self.sam_multi_points.append((clamped_pt.x(), clamped_pt.y()))
+            marker = QGraphicsEllipseItem(clamped_pt.x() - 5, clamped_pt.y() - 5, 10, 10)
+            marker.setPen(QPen(QColor(255, 200, 0), 2))
+            marker.setBrush(QBrush(QColor(255, 200, 0, 180)))
+            marker.setZValue(9998)
+            self.addItem(marker)
+            self.sam_point_markers.append(marker)
+            if self.sam_client:
+                self.sam_client.request_multi_point_inference(self.sam_multi_points, is_click=False)
+            return
+
+        # ---------------- SAM 左键确认 ----------------
+        if (self.sam_enabled and event.button() == Qt.LeftButton
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]):
+            # 有收集的多点 → 用多点确认
+            if len(self.sam_multi_points) > 0 and self.sam_client:
+                self.sam_client.request_multi_point_inference(self.sam_multi_points, is_click=True)
+                self.clear_multi_points()
+                return
+            # 无多点 → 单点确认
             if self.is_inside_image(pt) and self.sam_client:
                 self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=True)
             return
@@ -245,6 +309,8 @@ class Canvas(QGraphicsScene):
                 shape = PointShape(clamped_pt)
                 self.shape_drawn.emit(shape)
         elif event.button() == Qt.RightButton:
+            if self.sam_enabled:
+                return
             if self.mode == CanvasMode.POLY and len(self.poly_pts) > 2:
                 self.finish_poly_shape()
 
@@ -321,6 +387,13 @@ class Canvas(QGraphicsScene):
         if self.sam_hover_item:
             self.removeItem(self.sam_hover_item)
             self.sam_hover_item = None
+        self.clear_multi_points()
+
+    def clear_multi_points(self):
+        self.sam_multi_points.clear()
+        for m in self.sam_point_markers:
+            self.removeItem(m)
+        self.sam_point_markers.clear()
 
     def keyPressEvent(self, event):
         key = event.key()
