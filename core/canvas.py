@@ -255,7 +255,7 @@ class Canvas(QGraphicsScene):
                 and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]):
             # 有收集的多点 → 用多点确认
             if len(self.sam_multi_points) > 0 and self.sam_client:
-                self.sam_client.request_multi_point_inference(self.sam_multi_points, is_click=True)
+                self.sam_client.request_multi_point_inference(list(self.sam_multi_points), is_click=True)
                 self.clear_multi_points()
                 return
             # 无多点 → 单点确认
