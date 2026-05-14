@@ -1,0 +1,3 @@
+[submodule "sam3"]
+	path = sam3
+	url = https://github.com/zhn6818/sam3.git

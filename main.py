@@ -1,5 +1,6 @@
-import sys
 import os
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+import sys
 import json
 from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QInputDialog, QMessageBox, QLabel, QListWidgetItem
 from PySide6.QtCore import Qt, QPointF, QRectF
@@ -50,7 +51,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self._connect_signals()
         self._set_mode(CanvasMode.RECT)
-        self.sam_client.load_model_async(r"E:\2-浏览器下载的文件\sam3.pt")  # 模型路径
+        # 模型路径：sam3weights 目录下
+        model_path = os.path.join(os.path.dirname(__file__), "sam3weights", "sam3.pt")
+        if os.path.exists(model_path):
+            self.sam_client.load_model_async(model_path)
+        else:
+            self.statusBar.showMessage("未找到 sam3weights/sam3.pt，SAM 智能标注不可用。请将模型文件放入 sam3weights 文件夹")
 
     def _connect_signals(self):
         self.actionOpen.triggered.connect(self.open_dir)

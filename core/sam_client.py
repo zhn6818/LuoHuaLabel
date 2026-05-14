@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sam3'))
+
 import torch
 import numpy as np
 import cv2
@@ -12,8 +16,15 @@ try:
 except ImportError:
     pass
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# 自动检测设备：CUDA > MPS (Apple Silicon) > CPU
+DEVICE = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+
+if DEVICE == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+# autocast dtype: CUDA/MPS 用 bfloat16，CPU 用 float32
+AUTICAST_DTYPE = torch.bfloat16 if DEVICE in ("cuda", "mps") else torch.float32
 
 
 class ModelLoadWorker(QThread):
@@ -26,7 +37,7 @@ class ModelLoadWorker(QThread):
     def run(self):
         try:
             model = build_sam3_image_model(checkpoint_path=self.checkpoint_path, enable_inst_interactivity=True)
-            model.to("cuda")
+            model.to(DEVICE)
             processor = Sam3Processor(model)
             self.loaded.emit(model, processor, True, "模型加载成功")
         except Exception as e:
@@ -57,7 +68,7 @@ class SamInferenceWorker(QThread):
 
                 if task_type == 'point':
                     x, y = data
-                    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
                         masks, scores, _ = self.model.predict_inst(
                             inference_state=self.inference_state,
                             point_coords=np.array([[x, y]]),
@@ -98,7 +109,7 @@ class SamInferenceWorker(QThread):
                     if not self.processor:
                         continue
 
-                    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
                         out_state = self.processor.set_text_prompt(prompt=prompt_text, state=self.inference_state)
 
                         masks = out_state.get("masks", [])
@@ -204,7 +215,7 @@ class SAMClient(QObject):
         if not self.processor: return
         try:
             pil_img = Image.open(image_path).convert("RGB")
-            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
                 state = self.processor.set_image(pil_img)
                 self.inference_worker.inference_state = state
         except Exception as e:
