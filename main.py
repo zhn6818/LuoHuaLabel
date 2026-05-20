@@ -10,6 +10,7 @@ from main_dataset_tool import DatasetToolWindow
 from ui.main_window import Ui_MainWindow
 from core.canvas import Canvas, CanvasMode
 from core.sam_client import SAMClient
+from core.ocr_client import OCRClient
 from core.exporter import Exporter
 from core.shapes import RectShape, PolyShape, PointShape, RotatedRectShape
 from utils.message import DialogOver
@@ -42,7 +43,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.sam_client.text_result_ready.connect(self.handle_text_results)
         self.sam_client.model_status_changed.connect(self.update_model_status)
         self.sam_client.multi_point_result.connect(self.scene.handle_multi_point_result)
+        self.sam_client.image_set.connect(self._on_image_set)
         self.scene.sam_client = self.sam_client
+
+        self.ocr_client = OCRClient(self)
+        self.ocr_client.ocr_result_ready.connect(self.handle_ocr_results)
+        self.scene.ocr_client = self.ocr_client
+        self.scene.ocr_region_selected.connect(self.handle_ocr_region)
 
         # 撤销/重做时数据栈
         self.undo_stack = []
@@ -76,6 +83,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.actionPoint.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.POINT))
         self.actionRBox.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.RBOX))
         self.actionComboRect.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.COMBO_RECT))
+        self.actionAIOCR.triggered.connect(lambda checked=False: self._set_mode(CanvasMode.AIOCR))
 
         self.samSwitch.toggled.connect(self.on_sam_toggled)
 
@@ -199,6 +207,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if self.scene.mode == CanvasMode.POINT:
             DialogOver(self, "点标注模式下无法使用 SAM 智能提取", "提示", "warning")
             return
+        if self.scene.mode == CanvasMode.AIOCR:
+            DialogOver(self, "AI识别模式下请直接框选区域进行OCR识别", "提示", "warning")
+            return
 
         prompt = self.samPromptInput.text().strip()
         if prompt:
@@ -240,6 +251,43 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.auto_save_annotation()
 
+    def handle_ocr_region(self, shape):
+        if not self.current_image_path:
+            return
+        rect = shape.rect()
+        crop_region = [rect.x(), rect.y(), rect.width(), rect.height()]
+        self.helpLabel.setText("正在OCR识别中...")
+        self.helpLabel.setStyleSheet("color: orange;")
+        self.ocr_client.recognize(self.current_image_path, crop_region)
+
+    def handle_ocr_results(self, results, success, msg):
+        if not success:
+            self.helpLabel.setText(msg)
+            self.helpLabel.setStyleSheet("color: red;")
+            return
+
+        if not results:
+            self.helpLabel.setText("OCR识别完成：未检测到文本")
+            self.helpLabel.setStyleSheet("color: orange;")
+            return
+
+        self.helpLabel.setText(f"OCR识别完成：检测到 {len(results)} 个文本区域")
+        self.helpLabel.setStyleSheet("color: green;")
+
+        for res in results:
+            text = res["text"]
+            x, y, w, h = res["rect"]
+            shape = RectShape(QRectF(x, y, w, h), text)
+            self.scene.addItem(shape)
+            shape.update_label_text(text)
+            shape.update_label_position(shape)
+            shape.update_label_visibility(shape, is_selected=False, is_hovered=False)
+            self.add_class_to_list(text)
+
+        self.save_classes()
+        self.auto_save_annotation()
+        self.push_state()
+
     def show_help_dialog(self):
         help_text = """
         <h3>【快捷键大全】</h3>
@@ -252,6 +300,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             <li><b>P</b>：切换至 多边形标注</li>
             <li><b>T</b>：切换至 点标注</li>
             <li><b>O</b>：切换至 旋转框标注</li>
+            <li><b>I</b>：切换至 AI识别（OCR）</li>
             <li><b>Del / Backspace</b>：删除当前选中的标注框</li>
             <li><b>F1</b>：打开此帮助文档</li>
         </ul>
@@ -261,7 +310,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             <li><b>左键点击</b>：添加顶点</li>
             <li><b>Ctrl + Z</b>：撤销上一个顶点</li>
             <li><b>双击 / Enter</b>：闭合多边形</li>
-
         </ul>
         <hr>
         <h3>【旋转框绘制快捷键】</h3>
@@ -273,7 +321,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         <h3>【SAM 智能辅助】</h3>
         <ul>
             <li><b>鼠标点选</b>：开启开关后，鼠标悬停预览，点击直接确认生成高精度轮廓。</li>
-            <li><b>提示词提取</b>：在右下角输入框输入目标名称（如: dog），按回车即可一键全图抓取并打好框！左侧选中的是“矩形”还是“多边形”格式。</li>
+            <li><b>提示词提取</b>：在右下角输入框输入目标名称（如: dog），按回车即可一键全图抓取并打好框！左侧选中的是"矩形"还是"多边形"格式。</li>
+        </ul>
+        <hr>
+        <h3>【AI识别模式 (OCR)】</h3>
+        <ul>
+            <li><b>手动框选</b>：切换到AI识别模式后，拖动鼠标框选文本区域，松开后自动OCR识别并标注。</li>
+            <li><b>SAM辅助定位</b>：开启SAM后，鼠标悬停预览定位，左键确认后自动OCR识别文字内容。</li>
+            <li>识别结果自动作为标注标签添加到画布。</li>
         </ul>
         """
         QMessageBox.about(self, "LuoHuaLabel 使用说明", help_text)
@@ -301,6 +356,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.actionRBox.setChecked(True)
         elif mode == CanvasMode.COMBO_RECT:
             self.actionComboRect.setChecked(True)
+        elif mode == CanvasMode.AIOCR:
+            self.actionAIOCR.setChecked(True)
 
         if mode == CanvasMode.POINT:
             if self.samSwitch.isChecked():
@@ -314,7 +371,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.samSwitch.setEnabled(True)
             self.samPromptInput.setEnabled(True)
             self.samPromptBtn.setEnabled(True)
-            self.samPromptInput.setPlaceholderText("输入提示词提取 (如: dog)")
+            if mode == CanvasMode.AIOCR:
+                self.samPromptInput.setPlaceholderText("AI识别模式：框选区域自动OCR识别")
+            else:
+                self.samPromptInput.setPlaceholderText("输入提示词提取 (如: dog)")
 
     def _update_help_text(self, mode):
         is_sam = self.samSwitch.isChecked()
@@ -337,6 +397,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.helpLabel.setText("操作: 右键加点预览，左键合并为一个大矩形标注")
             else:
                 self.helpLabel.setText("操作: 请先开启SAM智能辅助")
+        elif mode == CanvasMode.AIOCR:
+            if is_sam:
+                self.helpLabel.setText("操作: 鼠标悬停SAM预览，左键确认定位并自动OCR识别")
+            else:
+                self.helpLabel.setText("操作: 拖动框选区域进行OCR识别，或开启SAM辅助定位")
 
     def load_classes(self, dir_path):
         self.class_list.clear()
@@ -486,15 +551,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.helpLabel.setText(msg)
         if success:
             self.helpLabel.setStyleSheet("color: green;")
-            # 模型加载成功后，检查用户是不是已经提前打开图片了
             if self.current_image_path:
-                self.helpLabel.setText("模型已就绪，正在自动分析当前图片特征...")
+                self.helpLabel.setText("模型已就绪，正在后台分析当前图片特征...")
                 self.helpLabel.setStyleSheet("color: orange;")
-                QApplication.processEvents()
-                self.sam_client.set_image(self.current_image_path)
+                self.sam_client.set_image_async(self.current_image_path)
+        else:
+            self.helpLabel.setStyleSheet("color: red;")
+
+    def _on_image_set(self, success, path_or_msg):
+        if success:
+            if self.current_image_path == path_or_msg:
                 self.helpLabel.setText("分析完成，可以开始智能标注")
                 self.helpLabel.setStyleSheet("color: green;")
         else:
+            self.helpLabel.setText(f"特征提取失败: {path_or_msg}")
             self.helpLabel.setStyleSheet("color: red;")
 
     def on_file_selected(self, current, previous):
@@ -513,12 +583,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.push_state()
 
             if self.sam_client.model:
-                self.helpLabel.setText("正在分析图片智能特征...")
+                self.helpLabel.setText("正在后台分析图片特征...")
                 self.helpLabel.setStyleSheet("color: orange;")
-                QApplication.processEvents()
-                self.sam_client.set_image(path)
-                self.helpLabel.setText("分析完成，可以开始智能标注")
-                self.helpLabel.setStyleSheet("color: green;")
+                self.sam_client.set_image_async(path)
             else:
                 self.helpLabel.setText("等待后台加载模型，稍后将自动分析图片...")
                 self.helpLabel.setStyleSheet("color: orange;")
@@ -712,6 +779,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def closeEvent(self, event):
         self.auto_save_annotation()
         self.sam_client.cleanup()
+        self.ocr_client.cleanup()
         super().closeEvent(event)
 
     def keyPressEvent(self, event):
@@ -764,6 +832,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.actionRBox.trigger()
         elif key == Qt.Key_M:
             self.actionComboRect.trigger()
+        elif key == Qt.Key_I:
+            self.actionAIOCR.trigger()
 
         super().keyPressEvent(event)
 

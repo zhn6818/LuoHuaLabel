@@ -344,9 +344,10 @@ class Ui_MainWindow(object):
         self.actionPoint = QAction("点标注 (T)", MainWindow)
         self.actionRBox = QAction("旋转框标注 (O)", MainWindow)
         self.actionComboRect = QAction("组合矩形 (M)", MainWindow)
+        self.actionAIOCR = QAction("AI识别 (I)", MainWindow)
 
         self.modeGroup = QActionGroup(MainWindow)
-        for act in [self.actionRect, self.actionPoly, self.actionPoint, self.actionRBox, self.actionComboRect]:
+        for act in [self.actionRect, self.actionPoly, self.actionPoint, self.actionRBox, self.actionComboRect, self.actionAIOCR]:
             act.setCheckable(True)
             self.modeGroup.addAction(act)
 
@@ -364,6 +365,7 @@ class Ui_MainWindow(object):
         self.toolBar.addAction(self.actionPoint)
         self.toolBar.addAction(self.actionRBox)
         self.toolBar.addAction(self.actionComboRect)
+        self.toolBar.addAction(self.actionAIOCR)
 
         self.toolBar.addSeparator()
         self.samWidget = QWidget()

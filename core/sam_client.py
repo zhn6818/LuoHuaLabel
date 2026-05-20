@@ -229,11 +229,48 @@ class SamInferenceWorker(QThread):
         self.wait()
 
 
+class SetImageWorker(QThread):
+    """异步提取图像特征，避免阻塞主线程"""
+    image_set = Signal(bool, str)
+
+    def __init__(self):
+        super().__init__()
+        self.processor = None
+        self.inference_worker = None
+        self.image_path = None
+        self._pending = False
+
+    def submit(self, image_path):
+        self.image_path = image_path
+        self._pending = True
+
+    def run(self):
+        while True:
+            if not self._pending:
+                self.msleep(20)
+                continue
+            self._pending = False
+            path = self.image_path
+            if not path or not self.processor:
+                continue
+            try:
+                pil_img = Image.open(path).convert("RGB")
+                with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
+                    state = self.processor.set_image(pil_img)
+                    if self.inference_worker:
+                        self.inference_worker.inference_state = state
+                self.image_set.emit(True, path)
+            except Exception as e:
+                print(f"图像特征提取失败: {e}")
+                self.image_set.emit(False, str(e))
+
+
 class SAMClient(QObject):
     model_status_changed = Signal(bool, str)
     inference_result = Signal(list, list, list, float, bool)
     text_result_ready = Signal(list, str)
     multi_point_result = Signal(list, list, list, float, bool)
+    image_set = Signal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -245,6 +282,11 @@ class SAMClient(QObject):
         self.inference_worker.multi_point_result.connect(self.multi_point_result)
         self.inference_worker.start()
         self.load_worker = None
+
+        self._set_image_worker = SetImageWorker()
+        self._set_image_worker.inference_worker = self.inference_worker
+        self._set_image_worker.image_set.connect(self.image_set)
+        self._set_image_worker.start()
 
     def load_model_async(self, checkpoint_path):
         self.model_status_changed.emit(False, "正在后台加载模型，请稍候...")
@@ -258,17 +300,14 @@ class SAMClient(QObject):
             self.processor = processor
             self.inference_worker.model = model
             self.inference_worker.processor = processor
+            self._set_image_worker.processor = processor
         self.model_status_changed.emit(success, msg)
 
-    def set_image(self, image_path):
-        if not self.processor: return
-        try:
-            pil_img = Image.open(image_path).convert("RGB")
-            with torch.inference_mode(), torch.autocast(device_type=DEVICE, dtype=AUTICAST_DTYPE):
-                state = self.processor.set_image(pil_img)
-                self.inference_worker.inference_state = state
-        except Exception as e:
-            print(f"图像特征提取失败: {e}")
+    def set_image_async(self, image_path):
+        """异步提取图像特征，完成后发射 image_set 信号"""
+        if not self.processor:
+            return
+        self._set_image_worker.submit(image_path)
 
     def request_inference(self, x, y, is_click):
         if self.model:
@@ -283,4 +322,6 @@ class SAMClient(QObject):
             self.inference_worker.request_multi_point_inference(points, is_click)
 
     def cleanup(self):
+        self._set_image_worker.quit()
+        self._set_image_worker.wait(3000)
         self.inference_worker.stop()

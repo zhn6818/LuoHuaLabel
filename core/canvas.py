@@ -12,10 +12,11 @@ class CanvasMode:
     POINT = 3
     RBOX = 4
     COMBO_RECT = 5
+    AIOCR = 6
 
     @staticmethod
     def get_mode_name(mode):
-        names = {1: "矩形", 2: "多边形", 3: "点", 4: "旋转框", 5: "组合矩形"}
+        names = {1: "矩形", 2: "多边形", 3: "点", 4: "旋转框", 5: "组合矩形", 6: "AI识别"}
         return names.get(mode, "未知")
 
 
@@ -24,6 +25,7 @@ class Canvas(QGraphicsScene):
     shape_drawn = Signal(object)
     shape_double_clicked = Signal(object)
     state_changed = Signal()
+    ocr_region_selected = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,6 +33,7 @@ class Canvas(QGraphicsScene):
         self.img_item = None
         self.sam_client = None
         self.sam_enabled = False
+        self.ocr_client = None
 
         self.drawing = False
         self.start_pt = None
@@ -124,7 +127,7 @@ class Canvas(QGraphicsScene):
         if self.sam_enabled and has_points:
             return
         if self.sam_enabled and self.is_inside_image(pt) and self.mode in [
-            CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.COMBO_RECT]:
+            CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.COMBO_RECT, CanvasMode.AIOCR]:
             if self.sam_client:
                 self.sam_client.request_inference(clamped_pt.x(), clamped_pt.y(), is_click=False)
             return
@@ -138,7 +141,7 @@ class Canvas(QGraphicsScene):
                           abs(clamped_pt.x() - self.start_pt.x()), abs(clamped_pt.y() - self.start_pt.y()))
             if self.temp_item: self.removeItem(self.temp_item)
 
-            if self.mode == CanvasMode.RECT:
+            if self.mode == CanvasMode.RECT or self.mode == CanvasMode.AIOCR:
                 self.temp_item = QGraphicsRectItem(rect)
                 self.temp_item.is_temp = True
                 self.temp_item.setPen(QPen(QColor(28, 126, 214), 2, Qt.DashLine))
@@ -187,7 +190,7 @@ class Canvas(QGraphicsScene):
             return
 
         # ---- 其他模式 ----
-        if self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+        if self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.AIOCR]:
             return
 
         # 多集合模式
@@ -207,11 +210,14 @@ class Canvas(QGraphicsScene):
         if not poly_pts or not rect_xywh:
             return
 
-        if self.mode == CanvasMode.RECT:
+        if self.mode == CanvasMode.RECT or self.mode == CanvasMode.AIOCR:
             x, y, w, h = rect_xywh
             rect = QRectF(x, y, w, h)
             if is_click:
-                self.shape_drawn.emit(RectShape(rect))
+                if self.mode == CanvasMode.AIOCR:
+                    self.ocr_region_selected.emit(RectShape(rect))
+                else:
+                    self.shape_drawn.emit(RectShape(rect))
             else:
                 self.sam_hover_item = QGraphicsRectItem(rect)
                 self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
@@ -239,7 +245,7 @@ class Canvas(QGraphicsScene):
 
     def handle_multi_point_result(self, poly_pts, rect_xywh, rect_obb, score, is_click):
         """处理多点提示的 SAM 推理结果"""
-        if not self.sam_enabled or self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]:
+        if not self.sam_enabled or self.mode not in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.AIOCR]:
             return
         if self.sam_hover_item:
             self.removeItem(self.sam_hover_item)
@@ -247,10 +253,13 @@ class Canvas(QGraphicsScene):
         if not poly_pts or not rect_xywh:
             return
 
-        if self.mode == CanvasMode.RECT:
+        if self.mode == CanvasMode.RECT or self.mode == CanvasMode.AIOCR:
             x, y, w, h = rect_xywh
             if is_click:
-                self.shape_drawn.emit(RectShape(QRectF(x, y, w, h)))
+                if self.mode == CanvasMode.AIOCR:
+                    self.ocr_region_selected.emit(RectShape(QRectF(x, y, w, h)))
+                else:
+                    self.shape_drawn.emit(RectShape(QRectF(x, y, w, h)))
             else:
                 self.sam_hover_item = QGraphicsRectItem(QRectF(x, y, w, h))
                 self.sam_hover_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
@@ -308,7 +317,7 @@ class Canvas(QGraphicsScene):
         # ================ SAM Ctrl+右键：多集合独立推理 ================
         if (self.sam_enabled and event.button() == Qt.RightButton
                 and event.modifiers() & Qt.ControlModifier
-                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.AIOCR]
                 and self.is_inside_image(pt)):
             marker = QGraphicsEllipseItem(clamped_pt.x() - 5, clamped_pt.y() - 5, 10, 10)
             marker.setPen(QPen(QColor(0, 200, 255), 2))
@@ -322,7 +331,7 @@ class Canvas(QGraphicsScene):
 
         # ================ SAM 右键：多点合一预览 ================
         if (self.sam_enabled and event.button() == Qt.RightButton
-                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.AIOCR]
                 and self.is_inside_image(pt)):
             self.sam_multi_points.append((clamped_pt.x(), clamped_pt.y()))
             marker = QGraphicsEllipseItem(clamped_pt.x() - 5, clamped_pt.y() - 5, 10, 10)
@@ -337,7 +346,7 @@ class Canvas(QGraphicsScene):
 
         # ================ SAM 左键确认 ================
         if (self.sam_enabled and event.button() == Qt.LeftButton
-                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX]):
+                and self.mode in [CanvasMode.RECT, CanvasMode.POLY, CanvasMode.RBOX, CanvasMode.AIOCR]):
             # 多集合确认
             if len(self.sam_multiset_results) > 0:
                 for poly_pts, rect_xywh, rect_obb in self.sam_multiset_results:
@@ -390,7 +399,7 @@ class Canvas(QGraphicsScene):
         # ---------------- 常规绘图起点 ----------------
         if not self.is_inside_image(pt) and not self.drawing: return
         if event.button() == Qt.LeftButton:
-            if self.mode in [CanvasMode.RECT, CanvasMode.RBOX]:
+            if self.mode in [CanvasMode.RECT, CanvasMode.RBOX, CanvasMode.AIOCR]:
                 self.drawing = True
                 self.start_pt = clamped_pt
             elif self.mode == CanvasMode.POLY:
@@ -429,6 +438,8 @@ class Canvas(QGraphicsScene):
                         cx, cy = rect.center().x(), rect.center().y()
                         w, h = rect.width(), rect.height()
                         self.shape_drawn.emit(RotatedRectShape(cx, cy, w, h, 0))
+                    elif self.mode == CanvasMode.AIOCR:
+                        self.ocr_region_selected.emit(RectShape(rect))
 
         self.state_changed.emit()
 
@@ -531,7 +542,7 @@ class Canvas(QGraphicsScene):
     def _make_preview_shape(self, poly_pts, rect_xywh, rect_obb, color):
         pen = QPen(color, 2, Qt.DashLine)
         brush = QBrush(QColor(color.red(), color.green(), color.blue(), 50))
-        if self.mode == CanvasMode.RECT:
+        if self.mode == CanvasMode.RECT or self.mode == CanvasMode.AIOCR:
             x, y, w, h = rect_xywh
             item = QGraphicsRectItem(QRectF(x, y, w, h))
             item.setPen(pen)

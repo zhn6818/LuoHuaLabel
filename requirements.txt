@@ -18,7 +18,9 @@ huggingface-hub~=0.36.2
 pandas~=2.3.3
 scikit-learn~=1.8.0
 setuptools==79.0.1
-git+https://github.com/facebookresearch/sam3.git
+# git+https://github.com/facebookresearch/sam3.git
 
+paddlepaddle~=3.3.1
+paddleocr~=3.5.0
 
 # python 版本是3.11 torch 版本是2.5.0+cu118
